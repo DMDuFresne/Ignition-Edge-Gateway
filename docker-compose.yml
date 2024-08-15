@@ -1,0 +1,155 @@
+
+x-default-logging:
+  &default-logging
+  logging:
+    options:
+      max-size: '100m'
+      max-file: '5'
+    driver: json-file
+
+x-ignition-opts:
+  &ignition-opts
+  <<: *default-logging
+  env_file: ignition/init/gateway.env
+  secrets:
+    - gateway-password
+
+services:
+
+  # Ignition Gateway: Headless Gateway
+  gateway-primary:
+    <<: *ignition-opts
+    build:
+      context: ignition/build
+      dockerfile: Dockerfile
+      args:
+        IGNITION_VERSION: ${IGNITION_GW_VERSION:-latest}
+        SUPPLEMENTAL_MODULES: ${IGNITION_GW_SUPP_MODULES:-mqtttransmission}
+        BASE_GWBK_NAME: ${IGNITION_GW_BASE_GWBK_NAME:-gateway.gwbk}
+        IGNITION_EDITION: standard
+        GATEWAY_ADMIN_USERNAME: ${IGNITION_GW_ADMIN_USERNAME:-admin}
+      secrets:
+        - gateway-password
+    pull_policy: build
+    container_name: Gateway
+    restart: unless-stopped
+    hostname: gateway
+    ports:
+      - 8089:8088
+    networks:
+      - edge-network
+    command: >
+      -n Ignition-gateway
+      -m ${IGNITION_GW_MAX_MEMORY:-512}
+      -a gateway.localtest.me
+      -h 8088
+      -s 8043
+    volumes:
+      - gateway_data:/usr/local/bin/ignition/data
+      - ./ignition/backup/gateway:/backup
+
+  # Mosquitto - MQTT Broker
+  broker:
+    <<: *default-logging
+    build: ./mosquitto
+    image: ${COMPOSE_PROJECT_NAME:-edge}-broker
+    container_name: Broker
+    restart: unless-stopped
+    hostname: broker
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    networks:
+      - edge-network
+    volumes:
+      - broker_config:/mosquitto/config:rw
+      - broker_data:/mosquitto/data:rw
+      - broker_log:/mosquitto/log:rw
+    environment:
+      MOSQUITTO_USERNAME: ${MOSQUITTO_USERNAME:-admin}
+      MOSQUITTO_PASSWORD: ${MOSQUITTO_PASSWORD:-password}
+
+  # Postgres - SQL Database
+  database:
+    <<: *default-logging
+    image: postgres:${POSTGRES_VERSION:-latest}
+    container_name: Database
+    restart: unless-stopped
+    hostname: database
+    ports:
+      - "5443:5432"
+    networks:
+      - edge-network
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-iiot}
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password
+    volumes:
+      - database_data:/var/lib/postgresql/data
+      - ./database/init:/docker-entrypoint-initdb.d
+    secrets:
+      - postgres-password
+
+  # InfluxDB - Timeseries Database
+  timeseries:
+    <<: *default-logging
+    image: influxdb:2.7
+    container_name: Timeseries
+    restart: unless-stopped
+    hostname: timeseries
+    ports:
+      - "8086:8086"
+    networks:
+      - edge-network
+    volumes:
+      - timeseries_data:/var/lib/influxdb2
+      - timeseries_config:/etc/influxdb2
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: ${DOCKER_INFLUXDB_INIT_USERNAME:-admin}
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${DOCKER_INFLUXDB_INIT_PASSWORD:-password}
+      DOCKER_INFLUXDB_INIT_ORG: ${DOCKER_INFLUXDB_INIT_ORG:-demo}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${DOCKER_INFLUXDB_INIT_BUCKET:-demo}
+      DOCKER_INFLUXDB_INIT_RETENTION: ${DOCKER_INFLUXDB_INIT_RETENTION:-0}
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${DOCKER_INFLUXDB_INIT_ADMIN_TOKEN:-demo}
+
+  # Telegraf - Timeseries Database Ingestion
+  telegraf:
+    <<: *default-logging
+    image: telegraf:1.31
+    container_name: telegraf
+    restart: unless-stopped
+    hostname: telegraf
+    networks:
+      - edge-network
+    volumes:
+      - ./telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
+    environment:
+      DOCKER_INFLUXDB_INIT_ORG: ${DOCKER_INFLUXDB_INIT_ORG:-demo}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${DOCKER_INFLUXDB_INIT_BUCKET:-demo}
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${DOCKER_INFLUXDB_INIT_ADMIN_TOKEN:-demo}
+      MOSQUITTO_USERNAME: ${MOSQUITTO_USERNAME:-admin}
+      MOSQUITTO_PASSWORD: ${MOSQUITTO_PASSWORD:-password}
+      TELEGRAF_TOPIC: ${TELEGRAF_TOPIC:-telegraf/ingest/#}
+    depends_on: 
+      - broker
+      - timeseries
+
+secrets:
+  gateway-password:
+    file: secrets/gateway-password
+  postgres-password:
+    file: ./secrets/postgres-password
+
+networks:
+  edge-network:
+
+volumes:
+  gateway_data:
+  database_data:
+  broker_config:
+  broker_data:
+  broker_log:
+  timeseries_data:
+  timeseries_config:
+  telegraf_config:
